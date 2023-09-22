@@ -1,0 +1,1 @@
+python buffer.py --dataset=CIFAR10 --model=ConvNet --train_epochs=50 --num_experts=100 --zca --buffer_path=/workspace/hyuns/src/mtt-distillation/buffer_images/cifar_10 --data_path=/workspace/hyuns/src/mtt-distillation/dataset --device=8
