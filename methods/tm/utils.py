@@ -13,7 +13,7 @@ from torch.utils.data import Dataset
 import torchvision
 from torchvision import datasets, transforms
 from scipy.ndimage.interpolation import rotate as scipyrotate
-from networks import MLP, ConvNet, LeNet, AlexNet, VGG11BN, VGG11, ResNet18, ResNet18BN_AP, ResNet18_AP
+from networks import MLP, ConvNet, LeNet, AlexNet, VGG11BN, VGG11, ResNet18, ResNet18BN_AP, ResNet18_AP, ResNet6ImageNet
 from pytorch_grad_cam import GradCAM, HiResCAM, ScoreCAM, GradCAMPlusPlus, AblationCAM, XGradCAM, EigenCAM, FullGrad
 from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
 from pytorch_grad_cam.utils.image import show_cam_on_image
@@ -94,8 +94,12 @@ def gallery(array, ncols=10):
     return result
 
 
-def get_cam(model, input_tensor, num_classes, target_layers, use_cuda):
-    target_layers = [model.features[target_layers]]
+def get_cam(model, input_tensor, num_classes, target_layers, use_cuda, args):
+    if args.model=='ConvNet':
+        target_layers = [model.features[target_layers]]
+    elif args.model=='ResNet6ImageNet':
+        target_layers = [k for k, _ in  model.named_children() if k.startswith('layer')]
+        target_layers = [getattr(model,target_layers[-1])]
     rgb_img = min_max(input_tensor).permute(0,2,3,1).detach().cpu().numpy()
     # print(rgb_img.shape)
     cam = GradCAM(model=model, target_layers=target_layers, use_cuda=use_cuda)
@@ -113,11 +117,22 @@ def get_cam(model, input_tensor, num_classes, target_layers, use_cuda):
         out.append(gallery(np.concatenate(vi)))
     return out
 
-def fig_image(syn, model, num_classes, ipc, samples, samples_l, save_dir, it):
+def fig_image(syn, model, num_classes, ipc, samples, samples_l, save_dir, it,args):
     k = 2000
+
     with torch.no_grad():
-        out = (model.features(syn))
-        out = out.view(out.shape[0],-1)
+        if args.model=='ConvNet':
+            out = (model.features(syn))
+            out = out.view(out.shape[0],-1)
+        else:
+            out = F.relu(model.bn1(model.conv1(syn)))
+            out = model.maxpool(out)
+            out = model.layer1(out)
+            out = model.layer2(out)
+            out = model.layer3(out)
+            out = model.layer4(out)
+            out = out.view(out.shape[0],-1)
+
 
     syn_label = []
     for c in range(num_classes):
@@ -330,7 +345,10 @@ def get_network(model, channel, num_classes, im_size=(32, 32), dist=False, args=
         net = ResNet18BN_AP(channel=channel, num_classes=num_classes)
     elif model == 'ResNet18_AP':
         net = ResNet18_AP(channel=channel, num_classes=num_classes)
-
+    elif model =='ResNet6ImageNet':
+        net = ResNet6ImageNet(channel=channel, num_classes=num_classes)
+    
+    
     elif model == 'ConvNetD1':
         net = ConvNet(channel=channel, num_classes=num_classes, net_width=net_width, net_depth=1, net_act=net_act, net_norm=net_norm, net_pooling=net_pooling, im_size=im_size)
     elif model == 'ConvNetD2':

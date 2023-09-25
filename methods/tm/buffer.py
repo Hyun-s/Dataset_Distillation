@@ -1,5 +1,5 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES']="0,1,3,4"
+os.environ['CUDA_VISIBLE_DEVICES']="0"
 import argparse
 import torch
 import torch.nn as nn

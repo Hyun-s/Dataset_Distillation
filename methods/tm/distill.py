@@ -1,5 +1,5 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES']="3,4,5"
+# os.environ['CUDA_VISIBLE_DEVICES']="0"
 import argparse
 import numpy as np
 import torch
@@ -8,12 +8,12 @@ import torch.nn.functional as F
 import torchvision.utils
 from tqdm import tqdm
 from utils import get_dataset, get_network, get_eval_pool, evaluate_synset, get_time, DiffAugment, ParamDiffAug
-from utils import allocate, repram, get_cam, fig_image
+from utils import allocate, repram, get_cam, fig_image, min_max
 import wandb
 import copy
 import random
 from reparam_module import ReparamModule
-
+from torchvision import transforms
 import numpy as np
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
@@ -69,7 +69,13 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 #     plt.scatter(out_2d[k:,0], out_2d[k:,1], c= l[k:], )
 #     plt.savefig(os.path.join(save_dir, "plots_{}.jpg".format(it)))
 #     return wandb.Image(Image.open(os.path.join(save_dir, "plots_{}.jpg".format(it))))
-
+def get_transform(args):
+    if args.dataset=='CIFAR10':
+        num_classes = 10
+        mean = [0.4914, 0.4822, 0.4465]
+        std = [0.2023, 0.1994, 0.2010]
+        trans = transforms.Compose([transforms.Normalize(mean=mean, std=std)])
+        return trans
 def main(args):
     print('Num of GPU: ',torch.cuda.device_count())
     if args.zca and args.texture:
@@ -96,7 +102,6 @@ def main(args):
     args.dsa_param = ParamDiffAug()
 
 
-    
 
 
     eval_it_pool = np.arange(0, args.Iteration + 1, args.eval_it).tolist()
@@ -111,6 +116,8 @@ def main(args):
     '''
     Update 
     '''
+    if args.dataset in ['CIFAR10']:
+        transform = get_transform(args)
     path =args.tsne_model
     model = get_network(args.model, channel, num_classes, im_size, args=args) # get a random model
     st = torch.load(path)
@@ -123,11 +130,22 @@ def main(args):
     label = []
     k = 2000
 
-    with torch.no_grad():
-        for x, y in tqdm(loader):
-            feat.append(model.features(x.to(args.device)).detach().cpu())
-            label.append(y)
 
+    with torch.no_grad():
+        if args.model=='ConvNet':
+            for x, y in tqdm(loader):
+                feat.append(model.features(x.to(args.device)).detach().cpu())
+                label.append(y)
+        else:
+            for x, y in tqdm(loader):
+                out = F.relu(model.bn1(model.conv1(x.to(args.device))))
+                out = model.maxpool(out)
+                out = model.layer1(out)
+                out = model.layer2(out)
+                out = model.layer3(out)
+                out = model.layer4(out)
+                feat.append(out.detach().cpu())
+                label.append(y)
     
 
     feat_ = torch.cat(feat).flatten(1)
@@ -291,6 +309,10 @@ def main(args):
 
     best_std = {m: 0 for m in model_eval_pool}
 
+    pre_best_acc = {m: 0 for m in model_eval_pool}
+
+    pre_best_std = {m: 0 for m in model_eval_pool}
+
     for it in range(0, args.Iteration+1):
         save_this_it = False
 
@@ -309,6 +331,8 @@ def main(args):
 
                 accs_test = []
                 accs_train = []
+                pre_accs_test = []
+                pre_accs_train = []
                 for it_eval in range(args.num_eval):
                     net_eval = get_network(model_eval, channel, num_classes, im_size, args=args).to(args.device) # get a random model
 
@@ -316,11 +340,18 @@ def main(args):
                     with torch.no_grad():
                         image_save = image_syn
                     image_syn_eval, label_syn_eval = copy.deepcopy(image_save.detach()), copy.deepcopy(eval_labs.detach()) # avoid any unaware modification
-
+                    if args.dataset in ['CIFAR10']:
+                        image_syn_pre = min_max(image_syn_eval)
+                        image_syn_pre = transform(image_syn_pre)
+                    else:
+                        image_syn_pre = min_max(image_syn_eval)
                     args.lr_net = syn_lr.item()
                     _, acc_train, acc_test = evaluate_synset(it_eval, net_eval, image_syn_eval, label_syn_eval, testloader, args, texture=args.texture)
+                    _, pre_acc_train, pre_acc_test = evaluate_synset(it_eval, net_eval, image_syn_pre, label_syn_eval, testloader, args, texture=args.texture)
                     accs_test.append(acc_test)
                     accs_train.append(acc_train)
+                    pre_accs_test.append(pre_acc_test)
+                    pre_accs_train.append(pre_acc_train)
                 accs_test = np.array(accs_test)
                 accs_train = np.array(accs_train)
                 acc_test_mean = np.mean(accs_test)
@@ -334,13 +365,29 @@ def main(args):
                 wandb.log({'Max_Accuracy/{}'.format(model_eval): best_acc[model_eval]}, step=it)
                 wandb.log({'Std/{}'.format(model_eval): acc_test_std}, step=it)
                 wandb.log({'Max_Std/{}'.format(model_eval): best_std[model_eval]}, step=it)
+                
+                # ----------------------------------------------------------------------------
+                pre_accs_test = np.array(pre_accs_test)
+                pre_accs_train = np.array(pre_accs_train)
+                pre_acc_test_mean = np.mean(pre_accs_test)
+                pre_acc_test_std = np.std(pre_accs_test)
+                if acc_test_mean > pre_best_acc[model_eval]:
+                    pre_best_acc[model_eval] = pre_acc_test_mean
+                    pre_best_std[model_eval] = pre_acc_test_std
+                    save_this_it = True
+                print('Evaluate %d random %s, mean = %.4f std = %.4f\n-------------------------'%(len(accs_test), model_eval, acc_test_mean, acc_test_std))
+                wandb.log({'Accuracy/{}_pre'.format(model_eval): pre_acc_test_mean}, step=it)
+                wandb.log({'Max_Accuracy/{}_pre'.format(model_eval): pre_best_acc[model_eval]}, step=it)
+                wandb.log({'Std/{}_pre'.format(model_eval): pre_acc_test_std}, step=it)
+                wandb.log({'Max_Std/{}_pre'.format(model_eval): pre_best_std[model_eval]}, step=it)
+
 
 
         if it in eval_it_pool and (save_this_it or it % 1000 == 0):
             with torch.no_grad():
                 image_save = image_syn.cuda()
-            syn_cam =  copy.deepcopy(image_syn).detach()
-            visualization = get_cam(model, syn_cam, num_classes, target_layers=-1, use_cuda=use_cuda)
+            syn_cam =  copy.deepcopy(image_save).detach()
+            visualization = get_cam(model, syn_cam, num_classes, target_layers=-1, use_cuda=use_cuda, args=args)
             visualization = [wandb.Image(vi) for vi in visualization]
             # visualization = get_cam(model, image_save, num_classes, target_layers=[model.features[-1]], use_cuda=True)
             with torch.no_grad():
@@ -370,7 +417,7 @@ def main(args):
                     wandb.log({"Synthetic_Images": wandb.Image(torch.nan_to_num(grid.detach().cpu()))}, step=it)
                     wandb.log({'Synthetic_Pixels': wandb.Histogram(torch.nan_to_num(image_save.detach().cpu()))}, step=it)
                     # try:
-                    wandb.log({"Synthetic_Manifold": fig_image(image_syn, model, num_classes, ipc, samples, samples_l, save_dir, it)},step=it)
+                    wandb.log({"Synthetic_Manifold": fig_image(image_syn, model, num_classes, ipc, samples, samples_l, save_dir, it, args=args)},step=it)
                     
                     # wandb.log({"Synthetic_CAM": visualization})
                     log_dict = {}
